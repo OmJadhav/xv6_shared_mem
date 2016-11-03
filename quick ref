@@ -1,0 +1,218 @@
+quick ref
+
+QUESTIONS
+ - WHERE TO INITIALIZE THE SHARED MEM RELATED DATA TO PROCESS - ALLOCPROC?
+ - return data type of sys call handler 
+ - kalloc returns (char*)  - now typecasting to void* - change?
+
+
+grep call syntax
+grep -H [search_string] user/*.h // search in user directory // -H gives the file name too 
+
+
+//syscalls
+void *shmgetat(int key, int num_pages)
+int shm_refcount(int key)
+
+
+mail2 
+Here are some clarification on p3b:
+
+1. same process *can* call shmgetat more than once.
+a. even with the *same* key. when it is called with the *same* key, you just return the virtual address that it is already mapped at. and the reference count does not increase since it has been already mapped to this process by the very first call to shmgetat with this key.
+b. a process can definitely call shmgetat multiple times with different keys. it will then have access to multiple shared regions.
+
+2. keys are *not* per process. they are global to the system. if process A does shmgetat(3, 1), and then process B does shmgetat(3, ANY_VALUE), they will both have access to the *same* *one* physical page.
+
+3. when a fork is called, every shared region has to be accessible to the new process *without* it needing to call shmgetat().
+
+4. shared regions have to be mapped starting from the *very end* of calling process’s address space.
+example:
+//assume no shared regions exist yet in the system
+process A: shmgetat(3, 1); //maps one physical page to the last page in calling process’s virtual address space, if the address space is not already full.
+process A: shmgetat(2, 2); //maps two physical pages to the second to and third to last page in calling process’s virtual address space. note that the order of shared regions in a process's virtual address space is not correlated to value of the key.
+
+mail 1
+NOTE:
+1. we will modify the current tests for grading, such that the keys used for shared regions. also system calls used for shmgetat_syscall_args test will be different so your implementation needs to be general to handle all system calls that take a pointer. also, hint: strings are also a pointer.
+2. we will be adding a few more tests for grading, which won't be released before the project is due. you may want to thoroughly test your implementation as well, without relying solely on these tests.
+3. all tests have equal number of points assigned to them currently. this will be changed when grading.
+
+
+
+[omjadhav@rockhopper-09] (14)$ grep -r fstat 
+include/syscall.h:#define SYS_fstat  13
+kernel/sysfunc.h:int sys_fstat(void);
+kernel/syscall.c:[SYS_fstat]   sys_fstat,
+kernel/sysfile.c:sys_fstat(void)
+tools/mkfs.c:		r = fstat(child_fd, &st);
+user/usys.S:SYSCALL(fstat)
+user/user.h:int fstat(int fd, struct stat*);
+user/ulib.c:  r = fstat(fd, st);
+user/ls.c:  if(fstat(fd, &st) < 0){
+[omjadhav@rockhopper-09] (15)$ ls kernel/sys
+syscall.c  sysfile.c  sysfunc.h  sysproc.c  
+[omjadhav@rockhopper-09] (15)$ vim kernel/sysfile.c 
+[omjadhav@rockhopper-09] (16)$ grep -r filestat 
+kernel/file.c:filestat(struct file *f, struct stat *st)
+kernel/defs.h:int             filestat(struct file*, struct stat*);
+kernel/sysfile.c:  return filestat(f, st)
+
+MOST OF THE WORK IN VM.C
+
+add two syscalls 
+//
+
+shem_accesss
+use mappages()
+
+tricky 
+	think about cleanup
+	exit() - AS is freed
+		follow the wait() code
+		make sure not to free SHARED pages
+
+
+easy first :shem_count work
+next shem_acesss
+then write and rread
+
+
+user program
+get pointer using shem access - print the address - should be around 640k
+write to it 
+and some other process come and read value from  it
+
+corner cases
+fork
+	- copy the shared pages - as of now - as it copies the whole address space
+	- now we want just the mapping of those pages
+
+exec()
+	- overwriting AS
+	- if had AS - get rid of them
+
+heap grows beyond may destroy the AS -
+ - malloc or break
+------------------------------------------------
+
+optional video notes
+
+ecec.c 
+
+  if((pgdir = setupkvm()) == 0)
+    goto bad;
+
+  // Load program into memory.
+  sz = 0;
+  for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
+    if(readi(ip, (char*)&ph, off, sizeof(ph)) != sizeof(ph))
+      goto bad;
+    if(ph.type != ELF_PROG_LOAD)
+      continue;
+    if(ph.memsz < ph.filesz)
+      goto bad;
+    if((sz = allocuvm(pgdir, sz, ph.va + ph.memsz)) == 0)            // in vm.c  -- create new page table - see description below
+      goto bad;
+    if(loaduvm(pgdir, (char*)ph.va, ip, ph.offset, ph.filesz) < 0)
+      goto bad;
+  }
+
+
+    - create new page table
+    - why wer create new page table?
+    	- if fails - go back and handle - and have copy maintained in the child 
+
+// vm.c
+allocuvm
+
+// Allocate page tables and physical memory to grow process from oldsz to
+// newsz, which need not be page aligned.  Returns new size or 0 on error.
+int
+allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
+{
+  char *mem;
+  uint a;
+
+  if(newsz > USERTOP)
+    return 0;
+  if(newsz < oldsz)
+    return oldsz;
+
+  a = PGROUNDUP(oldsz);
+  for(; a < newsz; a += PGSIZE){
+    mem = kalloc();
+    if(mem == 0){
+      cprintf("allocuvm out of memory\n");
+      deallocuvm(pgdir, newsz, oldsz);
+      return 0;
+    }
+    memset(mem, 0, PGSIZE);
+    mappages(pgdir, (char*)a, PGSIZE, PADDR(mem), PTE_W|PTE_U);
+  }
+  return newsz;
+}
+
+- validate the memory space - old size to new size 
+- kalloc - get kernel memory
+mappages - map - virtual address m to physical address mem - and writable to user prog  
+
+
+// Create PTEs for linear addresses starting at la that refer to
+// physical addresses starting at pa. la and size might not
+// be page-aligned.
+static int
+mappages(pde_t *pgdir, void *la, uint size, uint pa, int perm)
+{
+  char *a, *last;
+  pte_t *pte;
+  
+  a = PGROUNDDOWN(la);
+  last = PGROUNDDOWN(la + size - 1);
+  for(;;){
+    pte = walkpgdir(pgdir, a, 1);
+    if(pte == 0)
+      return -1;
+    if(*pte & PTE_P)
+      panic("remap");
+    *pte = pa | perm | PTE_P;
+    if(a == last)
+      break;
+    a += PGSIZE;
+    pa += PGSIZE;
+  }
+  return 0;
+}
+
+
+
+// user/makefile 
+- flags- where to start the code - that we have to change it to the hex value - now it is zero otherwise it wont work
+
+# where program execution should begin
+USER_LDFLAGS += --entry=main
+
+# location in memory where the program will be loaded
+USER_LDFLAGS += --section-start=.text=0x0
+-------------------------------------------------------
+
+VIDEO 2
+
+
+
+
+
+
+
+
+
+
+
+
+----------------------------------------------------------
+SHARED MEMORY CONCEPTS
+However processes cannot address physical memory directly. They have virtual addresses which the kernel will resolve to physical addresses. When a shared memory region is setup, the same physical memory location is addressed by the multiple processes. However the virtual addresses can be different though. Each process uses the virtual address it received only in its own context. Both the virtual addresses refer to the same physical memory.
+
+
+EXEC CALL
+When the child process calls exec(), all data in the original program is lost, and it is replaced with a running copy of the new program. This is known as overlaying. Although all data are replaced, the file descriptors that were open in the parent are closed only if the program has explicitly marked them close-on-exec. This allows for the common practice of the parent creating a pipe prior to calling fork() and using it to communicate with the executed program.
